@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +21,50 @@ import (
 
 const vacanciesFile = "vacancies.json"
 const joobleAPIKey = "ded3c1eb-8286-44c5-b34f-103bc0ffbc4d"
+const settingsFile = "settings.json" // ДОБАВЛЕНО
+
+// ДОБАВЛЕНО: Структура для хранения цветов темы
+type Theme struct {
+	Name        string
+	Background  walk.Color
+	Text        walk.Color
+	ButtonBG    walk.Color
+	ButtonText  walk.Color
+	TableBG     walk.Color
+	TableText   walk.Color
+	PanelBG     walk.Color
+	BorderColor walk.Color
+}
+
+// ДОБАВЛЕНО: Глобальные темы
+var (
+	lightTheme = Theme{
+		Name:        "Светлая",
+		Background:  walk.RGB(255, 255, 255),
+		Text:        walk.RGB(0, 0, 0),
+		ButtonBG:    walk.RGB(235, 235, 235),
+		ButtonText:  walk.RGB(0, 0, 0),
+		TableBG:     walk.RGB(255, 255, 255),
+		TableText:   walk.RGB(0, 0, 0),
+		PanelBG:     walk.RGB(245, 245, 245),
+		BorderColor: walk.RGB(200, 200, 200),
+	}
+
+	darkTheme = Theme{
+		Name:        "Тёмная",
+		Background:  walk.RGB(30, 30, 30),    // Тёмно-серый фон
+		Text:        walk.RGB(220, 220, 220), // Светло-серый текст
+		ButtonBG:    walk.RGB(45, 45, 45),    // Чуть светлее фона для кнопок
+		ButtonText:  walk.RGB(220, 220, 220), // Светло-серый текст кнопок
+		TableBG:     walk.RGB(35, 35, 35),    // Немного светлее фона для таблицы
+		TableText:   walk.RGB(220, 220, 220), // Светло-серый текст таблицы
+		PanelBG:     walk.RGB(40, 40, 40),    // Промежуточный серый для панелей
+		BorderColor: walk.RGB(60, 60, 60),    // Более светлый серый для границ
+	}
+)
+
+// ДОБАВЛЕНО: Текущая тема
+var currentTheme = lightTheme
 
 // Vacancy определяет структуру для хранения данных о вакансии
 type Vacancy struct {
@@ -30,6 +76,8 @@ type Vacancy struct {
 	Status          string   `json:"status,omitempty"`
 	ExperienceLevel string   `json:"experienceLevel,omitempty"` // ДОБАВЛЕНО: Уровень опыта
 	Notes           string   `json:"notes,omitempty"`           // ДОБАВЛЕНО: Заметки
+	ResumePath      string   `json:"resumePath,omitempty"`      // ДОБАВЛЕНО: Путь к файлу резюме
+	ResumeFileName  string   `json:"resumeFileName,omitempty"`  // ДОБАВЛЕНО: Имя файла резюме
 }
 
 // Глобальный срез для хранения вакансий
@@ -176,6 +224,7 @@ type AppMainWindow struct {
 	editVacancyButton   *walk.PushButton
 	deleteVacancyButton *walk.PushButton
 	onlineSearchButton  *walk.PushButton
+	resumeArchiveButton *walk.PushButton // ДОБАВЛЕНО: Кнопка архива резюме
 	hSplitter           *walk.Splitter
 
 	// Details Panel Fields
@@ -213,6 +262,14 @@ type AppMainWindow struct {
 
 	// Канал для отмены онлайн поиска
 	onlineSearchCancelChan chan struct{}
+
+	detailResumeLabel    *walk.Label
+	detailResumeDisplay  *walk.Label
+	detailResumeDropArea *walk.Composite
+	detailResumeOpenBtn  *walk.PushButton
+	detailResumeClearBtn *walk.PushButton
+
+	themeToggleButton *walk.PushButton
 }
 
 var possibleStatuses = []string{"Новая", "Планирую откликнуться", "Откликнулся", "Тестовое задание", "Собеседование", "Оффер", "Отказ", "В архиве"}
@@ -229,13 +286,57 @@ type AddVacancyDialog struct {
 	sourceURLLE     *walk.LineEdit
 	statusCB        *walk.ComboBox
 	experienceCB    *walk.ComboBox
-	notesTE         *walk.TextEdit // ДОБАВЛЕНО: Поле для заметок в диалоге
+	notesTE         *walk.TextEdit
 	acceptPB        *walk.PushButton
 	cancelPB        *walk.PushButton
 	vacancy         *Vacancy
 	isEdit          bool
 	originalTitle   string
 	originalCompany string
+}
+
+// ДОБАВЛЕНО: Структура для хранения настроек приложения
+type AppSettings struct {
+	ThemeName string `json:"theme_name"`
+}
+
+// ДОБАВЛЕНО: Глобальные настройки
+var appSettings = AppSettings{
+	ThemeName: "Светлая", // По умолчанию светлая тема
+}
+
+// ДОБАВЛЕНО: Функция загрузки настроек
+func loadSettings() {
+	data, err := os.ReadFile(settingsFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("Файл настроек %s не найден, используются настройки по умолчанию", settingsFile)
+			saveSettings() // Создаем файл с настройками по умолчанию
+			return
+		}
+		log.Printf("Ошибка чтения файла настроек %s: %v", settingsFile, err)
+		return
+	}
+
+	err = json.Unmarshal(data, &appSettings)
+	if err != nil {
+		log.Printf("Ошибка декодирования JSON из файла настроек %s: %v", settingsFile, err)
+		return
+	}
+}
+
+// ДОБАВЛЕНО: Функция сохранения настроек
+func saveSettings() {
+	data, err := json.MarshalIndent(appSettings, "", "  ")
+	if err != nil {
+		log.Printf("Ошибка кодирования настроек в JSON: %v", err)
+		return
+	}
+
+	err = os.WriteFile(settingsFile, data, 0644)
+	if err != nil {
+		log.Printf("Ошибка записи файла настроек %s: %v", settingsFile, err)
+	}
 }
 
 // showWelcomeDialog отображает приветственное диалоговое окно
@@ -280,6 +381,7 @@ func showWelcomeDialog(owner walk.Form) {
 func main() {
 	showWelcomeDialog(nil)
 	loadVacancies()
+	loadSettings() // Загружаем настройки
 
 	app := &AppMainWindow{}
 	app.vacancyModel = NewVacancyModel(allVacancies)
@@ -372,6 +474,13 @@ func main() {
 						Font:       Font{Family: "Segoe UI", PointSize: 10, Bold: true},
 					},
 					PushButton{
+						AssignTo:   &app.themeToggleButton,
+						Text:       "🌙 Тёмная тема",
+						OnClicked:  app.toggleTheme,
+						Background: SolidColorBrush{Color: walk.RGB(235, 235, 235)},
+						Font:       Font{Family: "Segoe UI", PointSize: 10, Bold: true},
+					},
+					PushButton{
 						AssignTo:   &app.editVacancyButton,
 						Text:       "Изменить",
 						OnClicked:  app.showEditVacancyDialog,
@@ -383,6 +492,13 @@ func main() {
 						AssignTo:   &app.deleteVacancyButton,
 						Text:       "Удалить",
 						OnClicked:  app.confirmDeleteVacancy,
+						Background: SolidColorBrush{Color: walk.RGB(235, 235, 235)},
+						Font:       Font{Family: "Segoe UI", PointSize: 10, Bold: true},
+					},
+					PushButton{
+						AssignTo:   &app.resumeArchiveButton,
+						Text:       "Архив резюме",
+						OnClicked:  app.showResumeArchive,
 						Background: SolidColorBrush{Color: walk.RGB(235, 235, 235)},
 						Font:       Font{Family: "Segoe UI", PointSize: 10, Bold: true},
 					},
@@ -452,13 +568,44 @@ func main() {
 												Font:          Font{PointSize: 9},
 											},
 											Label{AssignTo: &app.detailNotesLabel, Text: "Заметки:", Font: Font{Bold: true, PointSize: 9}},
-											TextEdit{
-												AssignTo:      &app.detailNotesTE,
-												VScroll:       true,
-												MinSize:       Size{Height: 60},
-												MaxSize:       Size{Height: 200},
-												StretchFactor: 1,
-												Font:          Font{PointSize: 9},
+											TextEdit{AssignTo: &app.detailNotesTE, MinSize: Size{0, 80}, VScroll: true, Text: "", ReadOnly: false, Font: Font{PointSize: 9}},
+											Label{AssignTo: &app.detailResumeLabel, Text: "Резюме:", Font: Font{Bold: true, PointSize: 9}},
+											Composite{
+												AssignTo:   &app.detailResumeDropArea,
+												Layout:     HBox{Margins: Margins{Top: 2, Bottom: 2}, Spacing: 5},
+												MinSize:    Size{Height: 40},
+												Background: SolidColorBrush{Color: walk.RGB(240, 240, 240)},
+												Children: []Widget{
+													Label{
+														AssignTo:      &app.detailResumeDisplay,
+														Text:          "Нажмите 'Выбрать' для добавления резюме",
+														TextAlignment: AlignCenter,
+														MinSize:       Size{Width: 200},
+													},
+													HSpacer{},
+													PushButton{
+														AssignTo:  &app.detailResumeOpenBtn,
+														Text:      "Открыть",
+														Enabled:   false,
+														MaxSize:   Size{Width: 70},
+														OnClicked: app.openResume,
+														Font:      Font{Family: "Segoe UI", PointSize: 9},
+													},
+													PushButton{
+														Text:      "Выбрать",
+														MaxSize:   Size{Width: 70},
+														OnClicked: app.selectResume,
+														Font:      Font{Family: "Segoe UI", PointSize: 9},
+													},
+													PushButton{
+														AssignTo:  &app.detailResumeClearBtn,
+														Text:      "×",
+														Enabled:   false,
+														MaxSize:   Size{Width: 25},
+														OnClicked: app.clearResume,
+														Font:      Font{Family: "Segoe UI", PointSize: 9, Bold: true},
+													},
+												},
 											},
 											PushButton{
 												AssignTo:   &app.saveVacancyChangesPB,
@@ -557,13 +704,21 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// Сначала инициализируем таблицу
 	if app.vacancyTable != nil {
 		app.vacancyTable.SetAlternatingRowBG(true)
 		app.vacancyModel.Sort(app.vacancyModel.sortColumn, app.vacancyModel.sortOrder)
 	}
-	if app.onlineResultsTable != nil {
-		app.onlineResultsTable.SetAlternatingRowBG(true)
+
+	// Затем применяем тему
+	initialTheme := lightTheme
+	if appSettings.ThemeName == "Тёмная" {
+		initialTheme = darkTheme
+		if app.themeToggleButton != nil {
+			app.themeToggleButton.SetText("☀ Светлая тема")
+		}
 	}
+	app.applyTheme(initialTheme)
 
 	app.vacancyModel.PublishRowsReset()
 	app.updateVacancyDetails()
@@ -786,8 +941,8 @@ func showVacancyDialogExt(app *AppMainWindow, currentVacancy *Vacancy, isEdit bo
 			LineEdit{AssignTo: &dlg.sourceURLLE, Text: dlg.vacancy.SourceURL, ReadOnly: sourceURLReadOnly, Font: Font{PointSize: 9}},
 			Label{Text: "Описание:", Font: Font{Bold: true, PointSize: 9}},
 			TextEdit{AssignTo: &dlg.descriptionTE, MinSize: Size{0, 100}, VScroll: true, Text: dlg.vacancy.Description, ReadOnly: fieldsReadOnly, Font: Font{PointSize: 9}},
-			Label{Text: "Заметки:", Font: Font{Bold: true, PointSize: 9}},                                                                             // ДОБАВЛЕНО
-			TextEdit{AssignTo: &dlg.notesTE, MinSize: Size{0, 80}, VScroll: true, Text: dlg.vacancy.Notes, ReadOnly: false, Font: Font{PointSize: 9}}, // ДОБАВЛЕНО (ReadOnly: false)
+			Label{Text: "Заметки:", Font: Font{Bold: true, PointSize: 9}},
+			TextEdit{AssignTo: &dlg.notesTE, MinSize: Size{0, 80}, VScroll: true, Text: dlg.vacancy.Notes, ReadOnly: false, Font: Font{PointSize: 9}},
 			Composite{
 				Layout: HBox{Margins: Margins{Top: 15}, SpacingZero: true},
 				Children: []Widget{
@@ -900,63 +1055,129 @@ func (app *AppMainWindow) updateVacancyDetails() {
 	updateUI := func(vacancy Vacancy, hasSelection bool) {
 		if !hasSelection {
 			// Clear details panel and disable save button if nothing is selected
-			app.detailTitleDisplay.SetText("-")
-			app.detailCompanyDisplay.SetText("-")
-			app.detailStatusCB.SetCurrentIndex(-1)
-			app.detailStatusCB.SetEnabled(false)
-			app.detailExperienceCB.SetCurrentIndex(-1)
-			app.detailExperienceCB.SetEnabled(false)
-			app.detailKeywordsLE.SetText("")
-			app.detailKeywordsLE.SetEnabled(false)
-			app.detailSourceURLLE.SetText("")
-			app.detailSourceURLLE.SetEnabled(false)
-			app.detailDescriptionTE.SetText("")
-			app.detailDescriptionTE.SetEnabled(false)
-			app.detailNotesTE.SetText("")
-			app.detailNotesTE.SetEnabled(false)
-			app.saveVacancyChangesPB.SetEnabled(false)
+			if app.detailTitleDisplay != nil {
+				app.detailTitleDisplay.SetText("-")
+			}
+			if app.detailCompanyDisplay != nil {
+				app.detailCompanyDisplay.SetText("-")
+			}
+			if app.detailStatusCB != nil {
+				app.detailStatusCB.SetCurrentIndex(-1)
+				app.detailStatusCB.SetEnabled(false)
+			}
+			if app.detailExperienceCB != nil {
+				app.detailExperienceCB.SetCurrentIndex(-1)
+				app.detailExperienceCB.SetEnabled(false)
+			}
+			if app.detailKeywordsLE != nil {
+				app.detailKeywordsLE.SetText("")
+				app.detailKeywordsLE.SetEnabled(false)
+			}
+			if app.detailSourceURLLE != nil {
+				app.detailSourceURLLE.SetText("")
+				app.detailSourceURLLE.SetEnabled(false)
+			}
+			if app.detailDescriptionTE != nil {
+				app.detailDescriptionTE.SetText("")
+				app.detailDescriptionTE.SetEnabled(false)
+			}
+			if app.detailNotesTE != nil {
+				app.detailNotesTE.SetText("")
+				app.detailNotesTE.SetEnabled(false)
+			}
+			if app.saveVacancyChangesPB != nil {
+				app.saveVacancyChangesPB.SetEnabled(false)
+			}
+			if app.detailResumeDisplay != nil {
+				app.detailResumeDisplay.SetText("Нет прикрепленного резюме")
+			}
+			if app.detailResumeOpenBtn != nil {
+				app.detailResumeOpenBtn.SetEnabled(false)
+			}
+			if app.detailResumeClearBtn != nil {
+				app.detailResumeClearBtn.SetEnabled(false)
+			}
 			return
 		}
 
 		// Update fields with selected vacancy data
-		app.detailTitleDisplay.SetText(vacancy.Title)
-		app.detailCompanyDisplay.SetText(vacancy.Company)
+		if app.detailTitleDisplay != nil {
+			app.detailTitleDisplay.SetText(vacancy.Title)
+		}
+		if app.detailCompanyDisplay != nil {
+			app.detailCompanyDisplay.SetText(vacancy.Company)
+		}
 
-		app.detailStatusCB.SetEnabled(true)
-		currentStatusIdx := -1
-		for i, s := range possibleStatuses {
-			if s == vacancy.Status {
-				currentStatusIdx = i
-				break
+		if app.detailStatusCB != nil {
+			app.detailStatusCB.SetEnabled(true)
+			currentStatusIdx := -1
+			for i, s := range possibleStatuses {
+				if s == vacancy.Status {
+					currentStatusIdx = i
+					break
+				}
+			}
+			app.detailStatusCB.SetCurrentIndex(currentStatusIdx)
+			if currentStatusIdx == -1 && vacancy.Status == "" && len(possibleStatuses) > 0 {
+				app.detailStatusCB.SetCurrentIndex(0)
 			}
 		}
-		app.detailStatusCB.SetCurrentIndex(currentStatusIdx)
-		if currentStatusIdx == -1 && vacancy.Status == "" && len(possibleStatuses) > 0 {
-			app.detailStatusCB.SetCurrentIndex(0)
-		}
 
-		app.detailExperienceCB.SetEnabled(true)
-		currentExpIdx := -1
-		for i, el := range possibleExperienceLevels {
-			if el == vacancy.ExperienceLevel {
-				currentExpIdx = i
-				break
+		if app.detailExperienceCB != nil {
+			app.detailExperienceCB.SetEnabled(true)
+			currentExpIdx := -1
+			for i, el := range possibleExperienceLevels {
+				if el == vacancy.ExperienceLevel {
+					currentExpIdx = i
+					break
+				}
+			}
+			app.detailExperienceCB.SetCurrentIndex(currentExpIdx)
+			if currentExpIdx == -1 && vacancy.ExperienceLevel == "" && len(possibleExperienceLevels) > 0 {
+				app.detailExperienceCB.SetCurrentIndex(0)
 			}
 		}
-		app.detailExperienceCB.SetCurrentIndex(currentExpIdx)
-		if currentExpIdx == -1 && vacancy.ExperienceLevel == "" && len(possibleExperienceLevels) > 0 {
-			app.detailExperienceCB.SetCurrentIndex(0)
+
+		if app.detailKeywordsLE != nil {
+			app.detailKeywordsLE.SetText(strings.Join(vacancy.Keywords, ", "))
+			app.detailKeywordsLE.SetEnabled(true)
+		}
+		if app.detailSourceURLLE != nil {
+			app.detailSourceURLLE.SetText(vacancy.SourceURL)
+			app.detailSourceURLLE.SetEnabled(true)
+		}
+		if app.detailDescriptionTE != nil {
+			app.detailDescriptionTE.SetText(vacancy.Description)
+			app.detailDescriptionTE.SetEnabled(true)
+		}
+		if app.detailNotesTE != nil {
+			app.detailNotesTE.SetText(vacancy.Notes)
+			app.detailNotesTE.SetEnabled(true)
+		}
+		if app.saveVacancyChangesPB != nil {
+			app.saveVacancyChangesPB.SetEnabled(true)
 		}
 
-		app.detailKeywordsLE.SetText(strings.Join(vacancy.Keywords, ", "))
-		app.detailKeywordsLE.SetEnabled(true)
-		app.detailSourceURLLE.SetText(vacancy.SourceURL)
-		app.detailSourceURLLE.SetEnabled(true)
-		app.detailDescriptionTE.SetText(vacancy.Description)
-		app.detailDescriptionTE.SetEnabled(true)
-		app.detailNotesTE.SetText(vacancy.Notes)
-		app.detailNotesTE.SetEnabled(true)
-		app.saveVacancyChangesPB.SetEnabled(true)
+		// Обновляем информацию о резюме
+		if app.detailResumeDisplay != nil {
+			if vacancy.ResumeFileName != "" {
+				app.detailResumeDisplay.SetText(vacancy.ResumeFileName)
+				if app.detailResumeOpenBtn != nil {
+					app.detailResumeOpenBtn.SetEnabled(true)
+				}
+				if app.detailResumeClearBtn != nil {
+					app.detailResumeClearBtn.SetEnabled(true)
+				}
+			} else {
+				app.detailResumeDisplay.SetText("Перетащите файл резюме сюда")
+				if app.detailResumeOpenBtn != nil {
+					app.detailResumeOpenBtn.SetEnabled(false)
+				}
+				if app.detailResumeClearBtn != nil {
+					app.detailResumeClearBtn.SetEnabled(false)
+				}
+			}
+		}
 	}
 
 	// Определяем, есть ли выделение и какие данные показывать
@@ -968,18 +1189,20 @@ func (app *AppMainWindow) updateVacancyDetails() {
 	}
 
 	// Вызываем обновление UI через Synchronize
-	app.MainWindow.Synchronize(func() {
-		updateUI(vacancy, hasSelection)
+	if app.MainWindow != nil {
+		app.MainWindow.Synchronize(func() {
+			updateUI(vacancy, hasSelection)
 
-		// Обновляем layout всей панели деталей
-		if app.detailsGroup != nil {
-			app.detailsGroup.SetVisible(false)
-			app.detailsGroup.SetVisible(true)
+			// Обновляем layout всей панели деталей
+			if app.detailsGroup != nil {
+				app.detailsGroup.SetVisible(false)
+				app.detailsGroup.SetVisible(true)
 
-			// Принудительно обновляем layout всего окна
-			app.MainWindow.SetBounds(app.MainWindow.Bounds())
-		}
-	})
+				// Принудительно обновляем layout всего окна
+				app.MainWindow.SetBounds(app.MainWindow.Bounds())
+			}
+		})
+	}
 }
 
 // saveVacancyDetails сохраняет изменения, сделанные в панели деталей
@@ -1478,4 +1701,444 @@ func (app *AppMainWindow) switchToOnlineSearchMode() {
 			}
 		})
 	}(searchTerm, cancelChan)
+}
+
+// ДОБАВЛЕНО: Функция для открытия файла резюме
+func (app *AppMainWindow) openResume() {
+	idx := app.vacancyTable.CurrentIndex()
+	if idx < 0 || idx >= len(app.vacancyModel.items) {
+		return
+	}
+
+	vacancy := app.vacancyModel.items[idx]
+	if vacancy.ResumePath == "" {
+		walk.MsgBox(app.MainWindow, "Информация", "Резюме не прикреплено к этой вакансии.", walk.MsgBoxIconInformation)
+		return
+	}
+
+	cmd := exec.Command("cmd", "/c", "start", vacancy.ResumePath)
+	err := cmd.Start()
+	if err != nil {
+		walk.MsgBox(app.MainWindow, "Ошибка", "Не удалось открыть файл резюме: "+err.Error(), walk.MsgBoxIconError)
+	}
+}
+
+// ДОБАВЛЕНО: Функция для очистки прикрепленного резюме
+func (app *AppMainWindow) clearResume() {
+	idx := app.vacancyTable.CurrentIndex()
+	if idx < 0 || idx >= len(app.vacancyModel.items) {
+		return
+	}
+
+	if walk.DlgCmdYes != walk.MsgBox(app.MainWindow, "Подтверждение",
+		"Вы уверены, что хотите открепить файл резюме от этой вакансии?",
+		walk.MsgBoxYesNo|walk.MsgBoxIconQuestion) {
+		return
+	}
+
+	originalIndex := app.findVacancyIndexInAllExt(app.vacancyModel.items[idx].Title, app.vacancyModel.items[idx].Company)
+	if originalIndex != -1 {
+		allVacancies[originalIndex].ResumePath = ""
+		allVacancies[originalIndex].ResumeFileName = ""
+		saveVacancies()
+		app.updateVacancyDetails()
+	}
+}
+
+// ДОБАВЛЕНО: Обработчик для drag-and-drop
+func (app *AppMainWindow) handleFileDrop(files []string) {
+	if len(files) == 0 {
+		return
+	}
+
+	idx := app.vacancyTable.CurrentIndex()
+	if idx < 0 || idx >= len(app.vacancyModel.items) {
+		walk.MsgBox(app.MainWindow, "Информация", "Пожалуйста, выберите вакансию для прикрепления резюме.", walk.MsgBoxIconInformation)
+		return
+	}
+
+	// Берем только первый файл
+	filePath := files[0]
+	fileName := filepath.Base(filePath)
+
+	// Проверяем расширение файла
+	ext := strings.ToLower(filepath.Ext(fileName))
+	allowedExts := map[string]bool{
+		".pdf":  true,
+		".doc":  true,
+		".docx": true,
+		".txt":  true,
+		".rtf":  true,
+	}
+
+	if !allowedExts[ext] {
+		walk.MsgBox(app.MainWindow, "Ошибка",
+			"Неподдерживаемый формат файла. Разрешены только: PDF, DOC, DOCX, TXT, RTF",
+			walk.MsgBoxIconError)
+		return
+	}
+
+	originalIndex := app.findVacancyIndexInAllExt(app.vacancyModel.items[idx].Title, app.vacancyModel.items[idx].Company)
+	if originalIndex != -1 {
+		allVacancies[originalIndex].ResumePath = filePath
+		allVacancies[originalIndex].ResumeFileName = fileName
+		saveVacancies()
+		app.updateVacancyDetails()
+	}
+}
+
+// Добавляем новый метод для выбора файла резюме
+func (app *AppMainWindow) selectResume() {
+	idx := app.vacancyTable.CurrentIndex()
+	if idx < 0 || idx >= len(app.vacancyModel.items) {
+		walk.MsgBox(app.MainWindow, "Информация", "Пожалуйста, выберите вакансию для прикрепления резюме.", walk.MsgBoxIconInformation)
+		return
+	}
+
+	dlg := new(walk.FileDialog)
+	dlg.Title = "Выберите файл резюме"
+	dlg.Filter = "Все поддерживаемые форматы (*.pdf;*.doc;*.docx;*.txt;*.rtf)|*.pdf;*.doc;*.docx;*.txt;*.rtf"
+
+	if ok, err := dlg.ShowOpen(app.MainWindow); err != nil {
+		walk.MsgBox(app.MainWindow, "Ошибка", "Ошибка при открытии диалога: "+err.Error(), walk.MsgBoxIconError)
+	} else if ok {
+		filePath := dlg.FilePath
+		fileName := filepath.Base(filePath)
+		ext := strings.ToLower(filepath.Ext(fileName))
+
+		allowedExts := map[string]bool{
+			".pdf":  true,
+			".doc":  true,
+			".docx": true,
+			".txt":  true,
+			".rtf":  true,
+		}
+
+		if !allowedExts[ext] {
+			walk.MsgBox(app.MainWindow, "Ошибка",
+				"Неподдерживаемый формат файла. Разрешены только: PDF, DOC, DOCX, TXT, RTF",
+				walk.MsgBoxIconError)
+			return
+		}
+
+		originalIndex := app.findVacancyIndexInAllExt(app.vacancyModel.items[idx].Title, app.vacancyModel.items[idx].Company)
+		if originalIndex != -1 {
+			allVacancies[originalIndex].ResumePath = filePath
+			allVacancies[originalIndex].ResumeFileName = fileName
+			saveVacancies()
+			app.updateVacancyDetails()
+		}
+	}
+}
+
+// ДОБАВЛЕНО: Метод для применения темы
+func (app *AppMainWindow) applyTheme(theme Theme) {
+	currentTheme = theme
+
+	// Основное окно и все контейнеры
+	mainBrush, _ := walk.NewSolidColorBrush(theme.Background)
+	defer mainBrush.Dispose()
+	app.MainWindow.SetBackground(mainBrush)
+
+	// Применяем тему к контейнерам
+	containers := []*walk.Composite{
+		app.localVacanciesContainer,
+		app.onlineResultsContainer,
+		app.detailResumeDropArea,
+	}
+
+	containerBrush, _ := walk.NewSolidColorBrush(theme.Background)
+	defer containerBrush.Dispose()
+	for _, container := range containers {
+		if container != nil {
+			container.SetBackground(containerBrush)
+		}
+	}
+
+	// ScrollView отдельно
+	if app.detailsScrollView != nil {
+		scrollBrush, _ := walk.NewSolidColorBrush(theme.Background)
+		defer scrollBrush.Dispose()
+		app.detailsScrollView.SetBackground(scrollBrush)
+	}
+
+	// Группы (GroupBox)
+	if app.detailsGroup != nil {
+		groupBrush, _ := walk.NewSolidColorBrush(theme.PanelBG)
+		defer groupBrush.Dispose()
+		app.detailsGroup.SetBackground(groupBrush)
+	}
+
+	// Кнопки
+	buttons := []*walk.PushButton{
+		app.searchButton,
+		app.addVacancyButton,
+		app.editVacancyButton,
+		app.deleteVacancyButton,
+		app.onlineSearchButton,
+		app.saveVacancyChangesPB,
+		app.detailResumeOpenBtn,
+		app.detailResumeClearBtn,
+		app.themeToggleButton,
+		app.resumeArchiveButton,
+		app.backToLocalButton,
+		app.cancelOnlineSearchButton,
+	}
+
+	buttonBrush, _ := walk.NewSolidColorBrush(theme.ButtonBG)
+	defer buttonBrush.Dispose()
+	for _, btn := range buttons {
+		if btn != nil {
+			btn.SetBackground(buttonBrush)
+		}
+	}
+
+	// Таблицы
+	tables := []*walk.TableView{
+		app.vacancyTable,
+		app.onlineResultsTable,
+	}
+
+	tableBrush, _ := walk.NewSolidColorBrush(theme.TableBG)
+	defer tableBrush.Dispose()
+	for _, table := range tables {
+		if table != nil {
+			table.SetBackground(tableBrush)
+		}
+	}
+
+	// Метки
+	labels := []*walk.Label{
+		app.searchLabel,
+		app.detailTitleLabel,
+		app.detailTitleDisplay,
+		app.detailCompanyLabel,
+		app.detailCompanyDisplay,
+		app.detailStatusLabel,
+		app.detailExperienceLabel,
+		app.detailKeywordsLabel,
+		app.detailSourceURLLabel,
+		app.detailDescriptionLabel,
+		app.detailNotesLabel,
+		app.detailResumeLabel,
+		app.detailResumeDisplay,
+		app.onlineResultsLabel,
+	}
+
+	for _, label := range labels {
+		if label != nil {
+			label.SetTextColor(theme.Text)
+		}
+	}
+
+	// ComboBox'ы
+	comboBoxes := []*walk.ComboBox{
+		app.searchFieldCB,
+		app.statusFilterCB,
+		app.experienceFilterCB,
+		app.detailStatusCB,
+		app.detailExperienceCB,
+	}
+
+	comboBoxBrush, _ := walk.NewSolidColorBrush(theme.ButtonBG)
+	defer comboBoxBrush.Dispose()
+	for _, cb := range comboBoxes {
+		if cb != nil {
+			cb.SetBackground(comboBoxBrush)
+		}
+	}
+
+	// LineEdit'ы
+	lineEdits := []*walk.LineEdit{
+		app.searchEdit,
+		app.detailKeywordsLE,
+		app.detailSourceURLLE,
+	}
+
+	editBrush, _ := walk.NewSolidColorBrush(theme.Background)
+	defer editBrush.Dispose()
+	for _, le := range lineEdits {
+		if le != nil {
+			le.SetBackground(editBrush)
+			le.SetTextColor(theme.Text)
+		}
+	}
+
+	// TextEdit'ы
+	textEdits := []*walk.TextEdit{
+		app.detailDescriptionTE,
+		app.detailNotesTE,
+	}
+
+	textEditBrush, _ := walk.NewSolidColorBrush(theme.Background)
+	defer textEditBrush.Dispose()
+	for _, te := range textEdits {
+		if te != nil {
+			te.SetBackground(textEditBrush)
+			te.SetTextColor(theme.Text)
+		}
+	}
+
+	// Обновляем цвета статусов для тёмной темы
+	if theme.Name == "Тёмная" {
+		statusColors = map[string]walk.Color{
+			"Новая": walk.RGB(0, 80, 0), // тёмно-зелёный
+			"Планирую откликнуться": walk.RGB(80, 80, 0),  // тёмно-жёлтый
+			"Откликнулся":           walk.RGB(0, 60, 80),  // тёмно-голубой
+			"Тестовое задание":      walk.RGB(80, 60, 0),  // тёмно-оранжевый
+			"Собеседование":         walk.RGB(60, 0, 80),  // тёмно-пурпурный
+			"Оффер":                 walk.RGB(0, 100, 0),  // насыщенный зелёный
+			"Отказ":                 walk.RGB(80, 0, 0),   // тёмно-красный
+			"В архиве":              walk.RGB(50, 50, 50), // тёмно-серый
+		}
+	} else {
+		statusColors = map[string]walk.Color{
+			"Новая": walk.RGB(220, 255, 220), // светло-зелёный
+			"Планирую откликнуться": walk.RGB(255, 255, 200), // светло-жёлтый
+			"Откликнулся":           walk.RGB(210, 240, 255), // светло-голубой
+			"Тестовое задание":      walk.RGB(255, 230, 200), // светло-оранжевый
+			"Собеседование":         walk.RGB(240, 220, 255), // светло-пурпурный
+			"Оффер":                 walk.RGB(180, 255, 180), // ярко-зелёный
+			"Отказ":                 walk.RGB(255, 200, 200), // светло-красный
+			"В архиве":              walk.RGB(220, 220, 220), // серый
+		}
+	}
+
+	// Обновляем отображение таблицы для применения новых цветов статусов
+	if app.vacancyTable != nil {
+		app.vacancyTable.Invalidate()
+	}
+}
+
+// ДОБАВЛЕНО: Метод для переключения темы
+func (app *AppMainWindow) toggleTheme() {
+	if currentTheme.Name == "Светлая" {
+		app.applyTheme(darkTheme)
+		app.themeToggleButton.SetText("☀ Светлая тема")
+	} else {
+		app.applyTheme(lightTheme)
+		app.themeToggleButton.SetText("🌙 Тёмная тема")
+	}
+}
+
+// ResumeArchiveEntry представляет запись в архиве резюме
+type ResumeArchiveEntry struct {
+	FileName    string
+	FilePath    string
+	VacancyName string
+	Company     string
+	AddedDate   string
+}
+
+// ResumeArchiveModel для TableView в окне архива
+type ResumeArchiveModel struct {
+	walk.TableModelBase
+	items []ResumeArchiveEntry
+}
+
+func NewResumeArchiveModel() *ResumeArchiveModel {
+	return &ResumeArchiveModel{items: []ResumeArchiveEntry{}}
+}
+
+func (m *ResumeArchiveModel) RowCount() int {
+	return len(m.items)
+}
+
+func (m *ResumeArchiveModel) Value(row, col int) interface{} {
+	item := m.items[row]
+	switch col {
+	case 0:
+		return item.FileName
+	case 1:
+		return item.VacancyName
+	case 2:
+		return item.Company
+	case 3:
+		return item.AddedDate
+	}
+	return ""
+}
+
+// ResumeArchiveDialog представляет окно архива резюме
+type ResumeArchiveDialog struct {
+	*walk.Dialog
+	model *ResumeArchiveModel
+	table *walk.TableView
+	owner *AppMainWindow
+}
+
+func ShowResumeArchive(owner *AppMainWindow) {
+	dlg := &ResumeArchiveDialog{
+		owner: owner,
+		model: NewResumeArchiveModel(),
+	}
+
+	// Заполняем модель данными из всех вакансий
+	for _, v := range allVacancies {
+		if v.ResumeFileName != "" && v.ResumePath != "" {
+			dlg.model.items = append(dlg.model.items, ResumeArchiveEntry{
+				FileName:    v.ResumeFileName,
+				FilePath:    v.ResumePath,
+				VacancyName: v.Title,
+				Company:     v.Company,
+				AddedDate:   "", // В будущем можно добавить дату
+			})
+		}
+	}
+
+	if _, err := (Dialog{
+		AssignTo:   &dlg.Dialog,
+		Title:      "Архив резюме",
+		MinSize:    Size{600, 400},
+		Layout:     VBox{},
+		Background: SolidColorBrush{Color: currentTheme.Background},
+		Children: []Widget{
+			TableView{
+				AssignTo:   &dlg.table,
+				Model:      dlg.model,
+				Background: SolidColorBrush{Color: currentTheme.TableBG},
+				Columns: []TableViewColumn{
+					{Title: "Имя файла", Width: 150},
+					{Title: "Вакансия", Width: 200},
+					{Title: "Компания", Width: 150},
+					{Title: "Дата добавления", Width: 100},
+				},
+				OnItemActivated: dlg.onItemActivated,
+			},
+			Composite{
+				Layout:     HBox{},
+				Background: SolidColorBrush{Color: currentTheme.Background},
+				Children: []Widget{
+					HSpacer{},
+					PushButton{
+						Text:       "Закрыть",
+						Background: SolidColorBrush{Color: currentTheme.ButtonBG},
+						OnClicked: func() {
+							dlg.Accept()
+						},
+					},
+				},
+			},
+		},
+	}.Run(owner)); err != nil {
+		log.Print("Dialog error: ", err)
+	}
+}
+
+func (d *ResumeArchiveDialog) onItemActivated() {
+	idx := d.table.CurrentIndex()
+	if idx < 0 || idx >= len(d.model.items) {
+		return
+	}
+
+	entry := d.model.items[idx]
+	cmd := exec.Command("cmd", "/c", "start", entry.FilePath)
+	if err := cmd.Start(); err != nil {
+		walk.MsgBox(d.Dialog, "Ошибка", "Не удалось открыть файл резюме: "+err.Error(), walk.MsgBoxIconError)
+	}
+}
+
+// showResumeArchive открывает окно архива резюме
+func (app *AppMainWindow) showResumeArchive() {
+	ShowResumeArchive(app)
 }
